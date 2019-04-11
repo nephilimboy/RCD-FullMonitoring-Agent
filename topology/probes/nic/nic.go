@@ -3,6 +3,7 @@ package nic
 import (
 	"github.com/shirou/gopsutil/net"
 	"time"
+	"go.uber.org/zap"
 )
 
 // ConnectionPollInterval poll OVS database every 4 seconds
@@ -40,12 +41,14 @@ type NetworkInterface struct {
 }
 
 type NicMonitor struct {
+	ZLogger           *zap.Logger
 	Protocol          string
 	Target            string
 	MonitorHandlers   []NicMonitorHandler
 	ticker            *time.Ticker
 	NetworkInterfaces map[string]*NetworkInterface //Map[name]Nic
-	done              chan struct{}
+	done chan struct {
+	}
 }
 
 func (m *NicMonitor) monitoringNicCounterStat() error {
@@ -72,6 +75,17 @@ func (m *NicMonitor) monitoringNicCounterStat() error {
 	return nil
 }
 
+func (m *NicMonitor) monitoringConnectionStatus() error {
+	connectionsStat, err := net.Connections("all")
+	if err != nil {
+		return err
+	}
+
+
+
+	return nil
+}
+
 func (m *NicMonitor) monitoringNic() error {
 	interfasesStat, err := net.Interfaces()
 	if err != nil {
@@ -92,39 +106,27 @@ func (m *NicMonitor) monitoringNic() error {
 
 func (m *NicMonitor) startMonitorNic() {
 	m.ticker = time.NewTicker(UpdateInterval)
-
-	//for {
-	//	select {
-	//	case <-m.ticker.C:
-	//		if err := m.monitoringNic(); err != nil {
-	//			//if connectedOnce {
-	//			//logging.GetLogger().Errorf(": re-connect error %v, will try again", err)
-	//			//}
-	//		}
-	//		if err := m.monitoringNicCounterStat(); err != nil {
-	//			//if connectedOnce {
-	//			//logging.GetLogger().Errorf(": re-connect error %v, will try again", err)
-	//			//}
-	//		}
-	//	case <-m.done:
-	//		break
-	//	}
-	//}
-
-	if err := m.monitoringNic(); err != nil {
-		//if connectedOnce {
-		//logging.GetLogger().Errorf(": re-connect error %v, will try again", err)
-		//}
-	}
-	if err := m.monitoringNicCounterStat(); err != nil {
-		//if connectedOnce {
-		//logging.GetLogger().Errorf(": re-connect error %v, will try again", err)
-		//}
+	for {
+		select {
+		case <-m.ticker.C:
+			if err := m.monitoringNic(); err != nil {
+				m.ZLogger.Error("Cannot get network interfaces | ", zap.Error(err))
+			}
+			if err := m.monitoringNicCounterStat(); err != nil {
+				m.ZLogger.Error("Cannot get network interfaces status | ", zap.Error(err))
+			}
+		case <-m.done:
+			break
+		}
 	}
 
 }
 
+func (m *NicMonitor) StopMonitorNic() {
+	m.done <- struct{}{}
+}
+
 func (m *NicMonitor) StartMonitorNic() {
-	//go m.startMonitorNic()
+	m.ZLogger.Info("Start monitoring network interfaces")
 	m.startMonitorNic()
 }
