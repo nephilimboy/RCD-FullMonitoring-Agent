@@ -4,6 +4,7 @@ import (
 	"github.com/shirou/gopsutil/net"
 	"time"
 	"go.uber.org/zap"
+	"github.com/google/gopacket/pcap"
 )
 
 // ConnectionPollInterval poll OVS database every 4 seconds
@@ -38,6 +39,8 @@ type NetworkInterface struct {
 	Dropout      uint64              `json:"dropout"`     // total number of outgoing packets which were dropped (always 0 on OSX and BSD)
 	Fifoin       uint64              `json:"fifoin"`      // total number of FIFO buffers errors while receiving
 	Fifoout      uint64              `json:"fifoout"`     // total number of FIFO buffers errors while sending
+	handler      *pcap.Handle
+	Packets      []string
 }
 
 type NicMonitor struct {
@@ -50,6 +53,8 @@ type NicMonitor struct {
 	done chan struct {
 	}
 }
+
+
 
 func (m *NicMonitor) monitoringNicCounterStat() error {
 	interfasesCounterStat, err := net.IOCounters(true)
@@ -75,23 +80,13 @@ func (m *NicMonitor) monitoringNicCounterStat() error {
 	return nil
 }
 
-func (m *NicMonitor) monitoringConnectionStatus() error {
-	connectionsStat, err := net.Connections("all")
-	if err != nil {
-		return err
-	}
-
-
-
-	return nil
-}
-
 func (m *NicMonitor) monitoringNic() error {
 	interfasesStat, err := net.Interfaces()
 	if err != nil {
 		return err
 	}
 	for _, nic := range interfasesStat {
+
 		m.NetworkInterfaces[nic.Name] = &NetworkInterface{
 			MTU:          nic.MTU,
 			Name:         nic.Name,
