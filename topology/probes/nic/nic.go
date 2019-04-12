@@ -5,6 +5,8 @@ import (
 	"time"
 	"go.uber.org/zap"
 	"github.com/google/gopacket/pcap"
+	"log"
+	"github.com/google/gopacket"
 )
 
 // ConnectionPollInterval poll OVS database every 4 seconds
@@ -54,7 +56,27 @@ type NicMonitor struct {
 	}
 }
 
+func (n *NetworkInterface) monitoringNicPacket() {
+	var (
+		snapshot_len int32 = 1024
+		promiscuous  bool  = false
+		err          error
+		//timeout      time.Duration = 30 * time.Second
+		//timeout = 0
+	)
 
+	//n.handler, err = pcap.OpenLive(n.Name, snapshot_len, promiscuous, timeout)
+	n.handler, err = pcap.OpenLive(n.Name, snapshot_len, promiscuous, 0)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer n.handler.Close()
+
+	packetSource := gopacket.NewPacketSource(n.handler, n.handler.LinkType())
+	for packet := range packetSource.Packets() {
+		n.Packets = append(n.Packets, packet.Dump())
+	}
+}
 
 func (m *NicMonitor) monitoringNicCounterStat() error {
 	interfasesCounterStat, err := net.IOCounters(true)
@@ -86,13 +108,16 @@ func (m *NicMonitor) monitoringNic() error {
 		return err
 	}
 	for _, nic := range interfasesStat {
+		if _, ok := m.NetworkInterfaces[nic.Name]; ok {
 
-		m.NetworkInterfaces[nic.Name] = &NetworkInterface{
-			MTU:          nic.MTU,
-			Name:         nic.Name,
-			HardwareAddr: nic.HardwareAddr,
-			Flags:        nic.Flags,
-			Addrs:        nic.Addrs,
+		} else {
+			m.NetworkInterfaces[nic.Name] = &NetworkInterface{
+				MTU:          nic.MTU,
+				Name:         nic.Name,
+				HardwareAddr: nic.HardwareAddr,
+				Flags:        nic.Flags,
+				Addrs:        nic.Addrs,
+			}
 		}
 
 	}
