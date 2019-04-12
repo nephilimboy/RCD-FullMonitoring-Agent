@@ -42,7 +42,8 @@ type NetworkInterface struct {
 	Fifoin       uint64              `json:"fifoin"`      // total number of FIFO buffers errors while receiving
 	Fifoout      uint64              `json:"fifoout"`     // total number of FIFO buffers errors while sending
 	handler      *pcap.Handle
-	Packets      []string
+	//PacketListener chan Packet
+	Packets []string
 }
 
 type NicMonitor struct {
@@ -57,6 +58,12 @@ type NicMonitor struct {
 }
 
 func (n *NetworkInterface) monitoringNicPacket() {
+
+	devices, _ := pcap.FindAllDevs()
+	//if err != nil {
+	//	log.Fatal(err)
+	//}
+
 	var (
 		snapshot_len int32 = 1024
 		promiscuous  bool  = false
@@ -65,16 +72,22 @@ func (n *NetworkInterface) monitoringNicPacket() {
 		//timeout = 0
 	)
 
-	//n.handler, err = pcap.OpenLive(n.Name, snapshot_len, promiscuous, timeout)
-	n.handler, err = pcap.OpenLive(n.Name, snapshot_len, promiscuous, 0)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer n.handler.Close()
+	for _, device := range devices {
+		//n.handler, err = pcap.OpenLive(n.Name, snapshot_len, promiscuous, timeout)
+		if (device.Name == n.Name) {
+			n.handler, err = pcap.OpenLive(n.Name, snapshot_len, promiscuous, 0)
+			if err != nil {
+				log.Fatal(err)
+			}
+			defer n.handler.Close()
 
-	packetSource := gopacket.NewPacketSource(n.handler, n.handler.LinkType())
-	for packet := range packetSource.Packets() {
-		n.Packets = append(n.Packets, packet.Dump())
+			packetSource := gopacket.NewPacketSource(n.handler, n.handler.LinkType())
+
+			//n.PacketListener <- packetSource.Packets()
+			for packet := range packetSource.Packets() {
+				n.Packets = append(n.Packets, packet.Dump())
+			}
+		}
 	}
 }
 
@@ -96,6 +109,9 @@ func (m *NicMonitor) monitoringNicCounterStat() error {
 			m.NetworkInterfaces[nicCounter.Name].Dropout = nicCounter.Dropout
 			m.NetworkInterfaces[nicCounter.Name].Fifoin = nicCounter.Fifoin
 			m.NetworkInterfaces[nicCounter.Name].Fifoout = nicCounter.Fifoout
+
+			//m.NetworkInterfaces[nicCounter.Name].Packets = append(m.NetworkInterfaces[nicCounter.Name].Packets,
+			//	<-m.NetworkInterfaces[nicCounter.Name].PacketListener)
 		}
 	}
 
@@ -111,13 +127,16 @@ func (m *NicMonitor) monitoringNic() error {
 		if _, ok := m.NetworkInterfaces[nic.Name]; ok {
 
 		} else {
+			//var handler pcap.Handle = nil
 			m.NetworkInterfaces[nic.Name] = &NetworkInterface{
 				MTU:          nic.MTU,
 				Name:         nic.Name,
 				HardwareAddr: nic.HardwareAddr,
 				Flags:        nic.Flags,
 				Addrs:        nic.Addrs,
+				handler:      &pcap.Handle{},
 			}
+			go m.NetworkInterfaces[nic.Name].monitoringNicPacket()
 		}
 
 	}
