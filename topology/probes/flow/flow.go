@@ -1,4 +1,4 @@
-package nic
+package flow
 
 import (
 	"github.com/shirou/gopsutil/net"
@@ -7,12 +7,14 @@ import (
 	"github.com/google/gopacket/pcap"
 	"log"
 	"github.com/google/gopacket"
+	"fmt"
+	"github.com/segmentio/kafka-go"
 )
 
 // ConnectionPollInterval poll OVS database every 4 seconds
 const UpdateInterval time.Duration = 4 * time.Second
 
-type NicMonitorHandler interface {
+type FlowMonitorHandler interface {
 	OnNicAdd(uuid string)
 	OnNicDelete(uuid string)
 }
@@ -42,22 +44,27 @@ type NetworkInterface struct {
 	Fifoin       uint64              `json:"fifoin"`      // total number of FIFO buffers errors while receiving
 	Fifoout      uint64              `json:"fifoout"`     // total number of FIFO buffers errors while sending
 	handler      *pcap.Handle
-	//PacketListener chan Packet
-	Packets []string
 }
 
-type NicMonitor struct {
-	ZLogger           *zap.Logger
-	Protocol          string
-	Target            string
-	MonitorHandlers   []NicMonitorHandler
-	ticker            *time.Ticker
-	NetworkInterfaces map[string]*NetworkInterface //Map[name]Nic
+type Packet struct {
+	NetworkInterface NetworkInterface
+	PacketDump       string
+}
+
+type FlowMonitor struct {
+	kafkaWriter 	*kafka.Writer
+	ZLogger         *zap.Logger
+	Protocol        string
+	Target          string
+	MonitorHandlers []FlowMonitorHandler
+	ticker          *time.Ticker
+	Packet          map[string]*Packet //Map[Name]Packet
+	InterfaceCache	[]string
 	done chan struct {
 	}
 }
 
-func (n *NetworkInterface) monitoringNicPacket() {
+func (n *Packet) monitoringNicPacket() {
 
 	devices, _ := pcap.FindAllDevs()
 	//if err != nil {
@@ -74,7 +81,8 @@ func (n *NetworkInterface) monitoringNicPacket() {
 
 	for _, device := range devices {
 		//n.handler, err = pcap.OpenLive(n.Name, snapshot_len, promiscuous, timeout)
-		if (device.Name == n.Name) {
+		//if (device.Name == n.Name) {
+		if (device.Name == "en0") {
 			n.handler, err = pcap.OpenLive(n.Name, snapshot_len, promiscuous, 0)
 			if err != nil {
 				log.Fatal(err)
@@ -83,15 +91,17 @@ func (n *NetworkInterface) monitoringNicPacket() {
 
 			packetSource := gopacket.NewPacketSource(n.handler, n.handler.LinkType())
 
-			//n.PacketListener <- packetSource.Packets()
-			for packet := range packetSource.Packets() {
-				n.Packets = append(n.Packets, packet.Dump())
-			}
+			temp := <-packetSource.Packets()
+			fmt.Println(temp)
+			n.Packets = append(n.Packets, temp.Dump())
+			//for packet := range packetSource.Packets() {
+			//	n.Packets = append(n.Packets, packet.Dump())
+			//}
 		}
 	}
 }
 
-func (m *NicMonitor) monitoringNicCounterStat() error {
+func (m *Packet) monitoringNicCounterStat() error {
 	interfasesCounterStat, err := net.IOCounters(true)
 	if err != nil {
 		return err
@@ -118,14 +128,14 @@ func (m *NicMonitor) monitoringNicCounterStat() error {
 	return nil
 }
 
-func (m *NicMonitor) monitoringNic() error {
+func (m *FlowMonitor) monitoringFlow(deviceName string) error {
 	interfasesStat, err := net.Interfaces()
 	if err != nil {
 		return err
 	}
 	for _, nic := range interfasesStat {
 		if _, ok := m.NetworkInterfaces[nic.Name]; ok {
-
+			go m.NetworkInterfaces[nic.Name].monitoringNicPacket()
 		} else {
 			//var handler pcap.Handle = nil
 			m.NetworkInterfaces[nic.Name] = &NetworkInterface{
@@ -143,29 +153,38 @@ func (m *NicMonitor) monitoringNic() error {
 	return nil
 }
 
-func (m *NicMonitor) startMonitorNic() {
-	m.ticker = time.NewTicker(UpdateInterval)
-	for {
-		select {
-		case <-m.ticker.C:
-			if err := m.monitoringNic(); err != nil {
-				m.ZLogger.Error("Cannot get network interfaces | ", zap.Error(err))
-			}
-			if err := m.monitoringNicCounterStat(); err != nil {
-				m.ZLogger.Error("Cannot get network interfaces status | ", zap.Error(err))
-			}
-		case <-m.done:
-			break
-		}
+func (m *FlowMonitor) startMonitorNic() {
+	//m.ticker = time.NewTicker(UpdateInterval)
+	devices, err := pcap.FindAllDevs()
+	if err != nil {
+		log.Fatal(err)
 	}
+
+	for _, device := range devices {
+		go m.monitoringFlow(device.Name)
+	}
+
+	//for {
+	//	select {
+	//	case <-m.ticker.C:
+	//		if err := m.monitoringNic(); err != nil {
+	//			m.ZLogger.Error("Cannot get network interfaces | ", zap.Error(err))
+	//		}
+	//		if err := m.monitoringNicCounterStat(); err != nil {
+	//			m.ZLogger.Error("Cannot get network interfaces status | ", zap.Error(err))
+	//		}
+	//	case <-m.done:
+	//		break
+	//	}
+	//}
 
 }
 
-func (m *NicMonitor) StopMonitorNic() {
+func (m *FlowMonitor) StopMonitorNic() {
 	m.done <- struct{}{}
 }
 
-func (m *NicMonitor) StartMonitorNic() {
+func (m *FlowMonitor) StartMonitorNic() {
 	m.ZLogger.Info("Start monitoring network interfaces")
 	m.startMonitorNic()
 }
