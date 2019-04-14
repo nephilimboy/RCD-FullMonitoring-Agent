@@ -7,8 +7,10 @@ import (
 	"github.com/google/gopacket/pcap"
 	"log"
 	"github.com/google/gopacket"
-	"fmt"
 	"github.com/segmentio/kafka-go"
+	"fmt"
+	"context"
+	"encoding/json"
 )
 
 // ConnectionPollInterval poll OVS database every 4 seconds
@@ -47,30 +49,54 @@ type NetworkInterface struct {
 }
 
 type Packet struct {
-	NetworkInterface NetworkInterface
-	PacketDump       string
+	NetworkInterface *NetworkInterface `json:"networkInterface"`
+	PacketDump       string            `json:"packetDump"`
 }
 
 type FlowMonitor struct {
-	kafkaWriter 	*kafka.Writer
-	ZLogger         *zap.Logger
-	Protocol        string
-	Target          string
-	MonitorHandlers []FlowMonitorHandler
-	ticker          *time.Ticker
-	Packet          map[string]*Packet //Map[Name]Packet
-	InterfaceCache	[]string
+	kafkaWriter       *kafka.Writer
+	ZLogger           *zap.Logger
+	Protocol          string
+	Target            string
+	MonitorHandlers   []FlowMonitorHandler
+	ticker            *time.Ticker
+	NetworkInterfaces map[string]*NetworkInterface //Map[Name]Packet
+	InterfaceCache    []string
 	done chan struct {
 	}
 }
 
-func (n *Packet) monitoringNicPacket() {
+func newKafkaWriter(kafkaURL, topic string) *kafka.Writer {
+	return kafka.NewWriter(kafka.WriterConfig{
+		Brokers:  []string{kafkaURL},
+		Topic:    topic,
+		Balancer: &kafka.LeastBytes{},
+	})
+}
 
-	devices, _ := pcap.FindAllDevs()
-	//if err != nil {
-	//	log.Fatal(err)
-	//}
+func (p *Packet) monitoringNicCounterStat() error {
+	interfasesCounterStat, err := net.IOCounters(true)
+	if err != nil {
+		return err
+	}
+	for _, nicCounter := range interfasesCounterStat {
+		if p.NetworkInterface.Name == nicCounter.Name {
+			p.NetworkInterface.BytesSent = nicCounter.BytesSent
+			p.NetworkInterface.BytesRecv = nicCounter.BytesRecv
+			p.NetworkInterface.PacketsRecv = nicCounter.PacketsRecv
+			p.NetworkInterface.PacketsSent = nicCounter.PacketsSent
+			p.NetworkInterface.Errin = nicCounter.Errin
+			p.NetworkInterface.Errout = nicCounter.Errout
+			p.NetworkInterface.Dropin = nicCounter.Dropin
+			p.NetworkInterface.Dropout = nicCounter.Dropout
+			p.NetworkInterface.Fifoin = nicCounter.Fifoin
+			p.NetworkInterface.Fifoout = nicCounter.Fifoout
+		}
+	}
+	return nil
+}
 
+func (p *Packet) monitoringNicPacket() {
 	var (
 		snapshot_len int32 = 1024
 		promiscuous  bool  = false
@@ -79,89 +105,78 @@ func (n *Packet) monitoringNicPacket() {
 		//timeout = 0
 	)
 
-	for _, device := range devices {
-		//n.handler, err = pcap.OpenLive(n.Name, snapshot_len, promiscuous, timeout)
-		//if (device.Name == n.Name) {
-		if (device.Name == "en0") {
-			n.handler, err = pcap.OpenLive(n.Name, snapshot_len, promiscuous, 0)
-			if err != nil {
-				log.Fatal(err)
-			}
-			defer n.handler.Close()
-
-			packetSource := gopacket.NewPacketSource(n.handler, n.handler.LinkType())
-
-			temp := <-packetSource.Packets()
-			fmt.Println(temp)
-			n.Packets = append(n.Packets, temp.Dump())
-			//for packet := range packetSource.Packets() {
-			//	n.Packets = append(n.Packets, packet.Dump())
-			//}
-		}
-	}
-}
-
-func (m *Packet) monitoringNicCounterStat() error {
-	interfasesCounterStat, err := net.IOCounters(true)
+	//n.handler, err = pcap.OpenLive(n.Name, snapshot_len, promiscuous, timeout)
+	handler, err := pcap.OpenLive(p.NetworkInterface.Name, snapshot_len, promiscuous, 0)
 	if err != nil {
-		return err
+		log.Fatal(err)
 	}
+	defer handler.Close()
 
-	for _, nicCounter := range interfasesCounterStat {
-		if _, ok := m.NetworkInterfaces[nicCounter.Name]; ok {
-			m.NetworkInterfaces[nicCounter.Name].BytesSent = nicCounter.BytesSent
-			m.NetworkInterfaces[nicCounter.Name].BytesRecv = nicCounter.BytesRecv
-			m.NetworkInterfaces[nicCounter.Name].PacketsRecv = nicCounter.PacketsRecv
-			m.NetworkInterfaces[nicCounter.Name].PacketsSent = nicCounter.PacketsSent
-			m.NetworkInterfaces[nicCounter.Name].Errin = nicCounter.Errin
-			m.NetworkInterfaces[nicCounter.Name].Errout = nicCounter.Errout
-			m.NetworkInterfaces[nicCounter.Name].Dropin = nicCounter.Dropin
-			m.NetworkInterfaces[nicCounter.Name].Dropout = nicCounter.Dropout
-			m.NetworkInterfaces[nicCounter.Name].Fifoin = nicCounter.Fifoin
-			m.NetworkInterfaces[nicCounter.Name].Fifoout = nicCounter.Fifoout
+	packetSource := gopacket.NewPacketSource(handler, handler.LinkType())
 
-			//m.NetworkInterfaces[nicCounter.Name].Packets = append(m.NetworkInterfaces[nicCounter.Name].Packets,
-			//	<-m.NetworkInterfaces[nicCounter.Name].PacketListener)
+	//temp := <-packetSource.Packets()
+	//fmt.Println(temp)
+
+	kafkaURL := "192.168.1.3:9092"
+	topic := "amir"
+	writer := newKafkaWriter(kafkaURL, topic)
+	defer writer.Close()
+
+	for packet := range packetSource.Packets() {
+		p.PacketDump = packet.Dump()
+		p.monitoringNicCounterStat()
+		temp, _ := json.Marshal(p)
+		msg := kafka.Message{
+			Key:   []byte(fmt.Sprint(p.NetworkInterface.Name)),
+			Value: temp,
 		}
-	}
-
-	return nil
-}
-
-func (m *FlowMonitor) monitoringFlow(deviceName string) error {
-	interfasesStat, err := net.Interfaces()
-	if err != nil {
-		return err
-	}
-	for _, nic := range interfasesStat {
-		if _, ok := m.NetworkInterfaces[nic.Name]; ok {
-			go m.NetworkInterfaces[nic.Name].monitoringNicPacket()
-		} else {
-			//var handler pcap.Handle = nil
-			m.NetworkInterfaces[nic.Name] = &NetworkInterface{
-				MTU:          nic.MTU,
-				Name:         nic.Name,
-				HardwareAddr: nic.HardwareAddr,
-				Flags:        nic.Flags,
-				Addrs:        nic.Addrs,
-				handler:      &pcap.Handle{},
-			}
-			go m.NetworkInterfaces[nic.Name].monitoringNicPacket()
+		err := writer.WriteMessages(context.Background(), msg)
+		if err != nil {
+			fmt.Println(err)
 		}
 
 	}
-	return nil
 }
 
-func (m *FlowMonitor) startMonitorNic() {
+func (m *FlowMonitor) monitoringFlow(nic net.InterfaceStat) {
+
+	//if _, ok := m.NetworkInterfaces[nic.Name]; ok {
+	//} else {
+	m.NetworkInterfaces[nic.Name] = &NetworkInterface{
+		MTU:          nic.MTU,
+		Name:         nic.Name,
+		HardwareAddr: nic.HardwareAddr,
+		Flags:        nic.Flags,
+		Addrs:        nic.Addrs,
+		handler:      &pcap.Handle{},
+	}
+	//}
+
+	packet := &Packet{
+		NetworkInterface: m.NetworkInterfaces[nic.Name],
+	}
+	packet.monitoringNicPacket()
+
+}
+
+func (m *FlowMonitor) startMonitorNic() error {
 	//m.ticker = time.NewTicker(UpdateInterval)
 	devices, err := pcap.FindAllDevs()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	for _, device := range devices {
-		go m.monitoringFlow(device.Name)
+	interfasesStat, err := net.Interfaces()
+	if err != nil {
+		return err
+	}
+
+	for _, nicInterface := range interfasesStat {
+		for _, readableInterface := range devices {
+			if nicInterface.Name == readableInterface.Name {
+				go m.monitoringFlow(nicInterface)
+			}
+		}
 	}
 
 	//for {
@@ -177,7 +192,7 @@ func (m *FlowMonitor) startMonitorNic() {
 	//		break
 	//	}
 	//}
-
+	return nil
 }
 
 func (m *FlowMonitor) StopMonitorNic() {
